@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use syn::parse_quote;
 
 use darling::ast::{Data, Style};
 use proc_macro::TokenStream;
@@ -62,6 +63,19 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
     let mut get_introspection_typename = Vec::new();
     let mut collect_all_fields = Vec::new();
 
+    let mut concat_complex_fields = quote!();
+    let mut complex_resolver = quote!();
+
+    concat_complex_fields = quote! {
+        fields.extend(<Self as #crate_name::ComplexObject>::fields(registry));
+    };
+    complex_resolver = quote! {
+        if let Some(value) = <Self as #crate_name::ComplexObject>::resolve_field(self, ctx).await? {
+            return Ok(Some(value));
+        }
+    };
+
+
     for variant in s {
         let enum_name = &variant.ident;
         let ty = match variant.fields.style {
@@ -113,6 +127,11 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
             registry_types.push(quote! {
                 <#p as #crate_name::OutputType>::create_type_info(registry);
                 registry.add_implements(&<#p as #crate_name::OutputType>::type_name(), ::std::convert::AsRef::as_ref(&#gql_typename));
+                let mut a = registry.types.get(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap().clone();
+                if let #crate_name::registry::MetaType::Object { ref mut fields, .. } = a {
+                    #concat_complex_fields
+                }
+                *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = a;
             });
 
             possible_types.push(quote! {
@@ -135,13 +154,14 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
     let mut schema_fields = Vec::new();
     let mut resolvers = Vec::new();
 
-    if interface_args.fields.is_empty() {
-        return Err(Error::new_spanned(
-            ident,
-            "A GraphQL Interface type must define one or more fields.",
-        )
-        .into());
-    }
+    // if interface_args.fields.is_empty() {
+    //     return Err(Error::new_spanned(
+    //         ident,
+    //         "A GraphQL Interface type must define one or more fields.",
+    //     )
+    //     .into());
+    // }
+
 
     for InterfaceField {
         name,
@@ -368,6 +388,7 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         impl #impl_generics #crate_name::resolver_utils::ContainerType for #ident #ty_generics #where_clause {
             async fn resolve_field(&self, ctx: &#crate_name::Context<'_>) -> #crate_name::ServerResult<::std::option::Option<#crate_name::Value>> {
                 #(#resolvers)*
+                #complex_resolver
                 ::std::result::Result::Ok(::std::option::Option::None)
             }
 
@@ -398,6 +419,7 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
                         fields: {
                             let mut fields = #crate_name::indexmap::IndexMap::new();
                             #(#schema_fields)*
+                            #concat_complex_fields
                             fields
                         },
                         possible_types: {
