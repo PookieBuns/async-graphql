@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use syn::parse_quote;
 
 use darling::ast::{Data, Style};
 use proc_macro::TokenStream;
@@ -62,6 +61,9 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
     let mut possible_types = Vec::new();
     let mut get_introspection_typename = Vec::new();
     let mut collect_all_fields = Vec::new();
+    let mut unit_struct_impls = Vec::new();
+    let mut unit_struct_types = vec![None; s.len()];
+    let mut is_unit_struct = vec![false; s.len()];
 
     let mut concat_complex_fields = quote!();
     let mut complex_resolver = quote!();
@@ -75,8 +77,7 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
         }
     };
 
-
-    for variant in s {
+    for (i, (variant, unit_struct_type)) in s.iter().zip(unit_struct_types.iter_mut()).enumerate() {
         let enum_name = &variant.ident;
         let ty = match variant.fields.style {
             Style::Tuple if variant.fields.fields.len() == 1 => &variant.fields.fields[0],
@@ -88,9 +89,71 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
                 .into())
             }
             Style::Unit => {
-                return Err(
-                    Error::new_spanned(enum_name, "Empty variants are not supported").into(),
-                )
+                // return Err(
+                //     Error::new_spanned(enum_name, "Empty variants are not supported").into(),
+                // )
+                let enum_name_string = enum_name.to_string();
+                let new_ty = Type::Path(
+                    syn::TypePath {
+                        qself: None,
+                        path: syn::Path::from(Ident::new(&enum_name_string, Span::call_site())),
+                    }
+                );
+                unit_struct_impls.push(quote! {
+                    struct #enum_name;
+                    impl OutputType for #enum_name {
+                        fn type_name() -> std::borrow::Cow<'static, str> {
+                            std::borrow::Cow::Borrowed(#enum_name_string)
+                        }
+
+                        fn create_type_info(registry: &mut registry::Registry) -> String {
+                            registry.create_output_type::<Self,_>(async_graphql::registry::MetaTypeId::Object, |registry| {
+                                async_graphql::registry::MetaType::Object {
+                                    name: std::borrow::Cow::Borrowed(#enum_name_string).to_string(),
+                                    description: None,
+                                    fields: {
+                                        let mut fields = async_graphql::indexmap::IndexMap::new();
+                                        fields
+                                    },
+                                    cache_control: async_graphql::CacheControl {
+                                        public: true,
+                                        max_age: 0i32,
+                                    },
+                                    extends: false,
+                                    shareable: false,
+                                    resolvable: true,
+                                    inaccessible: false,
+                                    interface_object: false,
+                                    tags: Vec::new(),
+                                    keys: ::std::option::Option::None,
+                                    visible: ::std::option::Option::None,
+                                    is_subscription: false,
+                                    rust_typename: ::std::option::Option::Some(::std::any::type_name::<Self>()),
+                                    directive_invocations: Vec::new(),
+                                }
+                            })
+                        }
+
+                        async fn resolve(
+                            &self,
+                            ctx: &async_graphql::ContextSelectionSet<'_>,
+                            _field: &async_graphql::Positioned<async_graphql::parser::types::Field>,
+                        ) -> async_graphql::ServerResult<async_graphql::Value> {
+                            async_graphql::resolver_utils::resolve_container(ctx, self).await
+                        }
+                    }
+
+                    impl resolver_utils::ContainerType for #enum_name {
+                        async fn resolve_field(&self, ctx: &Context<'_>) -> ServerResult<Option<async_graphql::Value>> {
+                            Ok(None)
+                        }
+                    }
+
+                    impl ObjectType for #enum_name {}
+                });
+                *unit_struct_type = Some(new_ty);
+                is_unit_struct[i] = true;
+                unit_struct_type.as_ref().unwrap()
             }
             Style::Struct => {
                 return Err(Error::new_spanned(
@@ -112,39 +175,76 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
             let mut assert_ty = p.clone();
             RemoveLifetime.visit_type_path_mut(&mut assert_ty);
 
-            type_into_impls.push(quote! {
-                #crate_name::static_assertions_next::assert_impl!(for(#(#type_params),*) #assert_ty: (#crate_name::ObjectType) | (#crate_name::InterfaceType));
+            if !is_unit_struct[i] {
+                type_into_impls.push(quote! {
+                    #crate_name::static_assertions_next::assert_impl!(for(#(#type_params),*) #assert_ty: (#crate_name::ObjectType) | (#crate_name::InterfaceType));
 
-                #[allow(clippy::all, clippy::pedantic)]
-                impl #impl_generics ::std::convert::From<#p> for #ident #ty_generics #where_clause {
-                    fn from(obj: #p) -> Self {
-                        #ident::#enum_name(obj)
+                    #[allow(clippy::all, clippy::pedantic)]
+                    impl #impl_generics ::std::convert::From<#p> for #ident #ty_generics #where_clause {
+                        fn from(obj: #p) -> Self {
+                            #ident::#enum_name(obj)
+                        }
                     }
-                }
-            });
+                });
+            } else {
+                type_into_impls.push(quote! {
+                    #crate_name::static_assertions_next::assert_impl!(for(#(#type_params),*) #assert_ty: (#crate_name::ObjectType) | (#crate_name::InterfaceType));
+
+                    #[allow(clippy::all, clippy::pedantic)]
+                    impl #impl_generics ::std::convert::From<#p> for #ident #ty_generics #where_clause {
+                        fn from(obj: #p) -> Self {
+                            #ident::#enum_name
+                        }
+                    }
+                });
+            }
             enum_names.push(enum_name);
 
             registry_types.push(quote! {
                 <#p as #crate_name::OutputType>::create_type_info(registry);
                 registry.add_implements(&<#p as #crate_name::OutputType>::type_name(), ::std::convert::AsRef::as_ref(&#gql_typename));
-                let mut a = registry.types.get(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap().clone();
-                if let #crate_name::registry::MetaType::Object { ref mut fields, .. } = a {
-                    #concat_complex_fields
+                // let mut a = registry.types.get(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap().clone();
+                // if let #crate_name::registry::MetaType::Object { ref mut fields, .. } = a {
+                //     #concat_complex_fields
+                // }
+                // *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = a;
+                let output_type = registry.types.get(&String::from(<#p as #crate_name::OutputType>::type_name()));
+                let t_name = <#p as #crate_name::OutputType>::type_name();
+                match output_type {
+                    Some(meta_type) => {
+                        let mut cloned = meta_type.clone();
+                        if let #crate_name::registry::MetaType::Object { ref mut fields, .. } = cloned {
+                            #concat_complex_fields
+                        }
+                        *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = cloned;
+                    },
+                    None => {panic!("Type not found in registry")}
                 }
-                *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = a;
             });
 
             possible_types.push(quote! {
                 possible_types.insert(<#p as #crate_name::OutputType>::type_name().into_owned());
             });
 
-            get_introspection_typename.push(quote! {
-                #ident::#enum_name(obj) => <#p as #crate_name::OutputType>::type_name()
-            });
+            if !is_unit_struct[i] {
+                get_introspection_typename.push(quote! {
+                    #ident::#enum_name(obj) => <#p as #crate_name::OutputType>::type_name()
+                });
+            } else {
+                get_introspection_typename.push(quote! {
+                    #ident::#enum_name => <#p as #crate_name::OutputType>::type_name()
+                });
+            }
 
-            collect_all_fields.push(quote! {
-                #ident::#enum_name(obj) => obj.collect_all_fields(ctx, fields)
-            });
+            if !is_unit_struct[i] {
+                collect_all_fields.push(quote! {
+                    #ident::#enum_name(obj) => obj.collect_all_fields(ctx, fields)
+                });
+            } else {
+                collect_all_fields.push(quote! {
+                    #ident::#enum_name => #p.collect_all_fields(ctx, fields)
+                });
+            }
         } else {
             return Err(Error::new_spanned(ty, "Invalid type").into());
         }
@@ -161,7 +261,6 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
     //     )
     //     .into());
     // }
-
 
     for InterfaceField {
         name,
@@ -377,6 +476,7 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
 
     let visible = visible_fn(&interface_args.visible);
     let expanded = quote! {
+        #(#unit_struct_impls)*
         #(#type_into_impls)*
 
         #[allow(clippy::all, clippy::pedantic)]
