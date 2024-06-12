@@ -682,6 +682,8 @@ pub struct Interface {
     pub tags: Vec<String>,
     #[darling(default, multiple, rename = "directive")]
     pub directives: Vec<Expr>,
+    #[darling(default)]
+    pub complex: bool,
     // for OneofObject
     #[darling(default)]
     pub input_name: Option<String>,

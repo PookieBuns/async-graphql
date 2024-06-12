@@ -68,14 +68,16 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
     let mut concat_complex_fields = quote!();
     let mut complex_resolver = quote!();
 
-    concat_complex_fields = quote! {
-        fields.extend(<Self as #crate_name::ComplexObject>::fields(registry));
-    };
-    complex_resolver = quote! {
-        if let Some(value) = <Self as #crate_name::ComplexObject>::resolve_field(self, ctx).await? {
-            return Ok(Some(value));
-        }
-    };
+    if interface_args.complex {
+        concat_complex_fields = quote! {
+            fields.extend(<Self as #crate_name::ComplexObject>::fields(registry));
+        };
+        complex_resolver = quote! {
+            if let Some(value) = <Self as #crate_name::ComplexObject>::resolve_field(self, ctx).await? {
+                return Ok(Some(value));
+            }
+        };
+    }
 
     for (i, (variant, unit_struct_type)) in s.iter().zip(unit_struct_types.iter_mut()).enumerate() {
         let enum_name = &variant.ident;
@@ -208,17 +210,17 @@ pub fn generate(interface_args: &args::Interface) -> GeneratorResult<TokenStream
                 //     #concat_complex_fields
                 // }
                 // *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = a;
-                let output_type = registry.types.get(&String::from(<#p as #crate_name::OutputType>::type_name()));
+                let output_type = registry.types.get(&<#p as #crate_name::OutputType>::type_name().into_owned());
                 let t_name = <#p as #crate_name::OutputType>::type_name();
                 match output_type {
-                    Some(meta_type) => {
-                        let mut cloned = meta_type.clone();
+                    ::std::option::Option::Some(meta_type) => {
+                        let mut cloned = ::std::clone::Clone::clone(meta_type);
                         if let #crate_name::registry::MetaType::Object { ref mut fields, .. } = cloned {
                             #concat_complex_fields
                         }
-                        *registry.types.get_mut(&String::from(<#p as #crate_name::OutputType>::type_name())).unwrap() = cloned;
+                        *registry.types.get_mut(&<#p as #crate_name::OutputType>::type_name().into_owned()).unwrap() = cloned;
                     },
-                    None => {panic!("Type not found in registry")}
+                    ::std::option::Option::None => {::std::panic!("Type not found in registry")}
                 }
             });
 
